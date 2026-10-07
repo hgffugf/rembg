@@ -1,3 +1,4 @@
+import base64
 import ipaddress
 import json
 import os
@@ -10,7 +11,7 @@ import aiohttp
 import click
 import uvicorn
 from asyncer import asyncify
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query
+from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import Response
 
@@ -98,7 +99,7 @@ def _is_blocked_ip(ip: Union[ipaddress.IPv4Address, ipaddress.IPv6Address]) -> b
 @click.option(
     "-p",
     "--port",
-    default=7000,
+    default=int(os.environ.get("PORT", 7000)),
     type=int,
     show_default=True,
     help="port",
@@ -275,7 +276,9 @@ def s_command(port: int, host: str, log_level: str, threads: int, no_ui: bool) -
                 else None
             )
 
-    def im_without_bg(content: bytes, commons: CommonQueryParams) -> Response:
+    def process_image(
+        content: bytes, commons: Union[CommonQueryParams, CommonQueryPostParams]
+    ) -> bytes:
         kwargs = {}
 
         if commons.extras:
@@ -292,23 +295,37 @@ def s_command(port: int, host: str, log_level: str, threads: int, no_ui: bool) -
             session = new_session(commons.model, **kwargs)
             sessions[cache_key] = session
 
+        return remove(
+            content,
+            session=session,
+            alpha_matting=commons.a,
+            alpha_matting_foreground_threshold=commons.af,
+            alpha_matting_background_threshold=commons.ab,
+            alpha_matting_erode_size=commons.ae,
+            only_mask=commons.om,
+            post_process_mask=commons.ppm,
+            decontaminate=commons.dc,
+            vitmatte=commons.vm,
+            bgcolor=commons.bgc,
+            **kwargs,
+        )
+
+    def im_without_bg(
+        content: bytes, commons: Union[CommonQueryParams, CommonQueryPostParams]
+    ) -> Response:
         return Response(
-            remove(
-                content,
-                session=session,
-                alpha_matting=commons.a,
-                alpha_matting_foreground_threshold=commons.af,
-                alpha_matting_background_threshold=commons.ab,
-                alpha_matting_erode_size=commons.ae,
-                only_mask=commons.om,
-                post_process_mask=commons.ppm,
-                decontaminate=commons.dc,
-                vitmatte=commons.vm,
-                bgcolor=commons.bgc,
-                **kwargs,
-            ),
+            process_image(content, commons),
             media_type="image/png",
         )
+
+    @app.get(
+        path="/health",
+        tags=["Health"],
+        summary="Health Check",
+        description="Health check endpoint for container probes and monitoring.",
+    )
+    async def health():
+        return {"status": "ok"}
 
     @app.on_event("startup")
     def startup():
@@ -455,6 +472,40 @@ def s_command(port: int, host: str, log_level: str, threads: int, no_ui: bool) -
         commons: CommonQueryPostParams = Depends(),
     ):
         return await asyncify(im_without_bg)(file, commons)  # type: ignore
+
+    @app.post(
+        path="/api/remove/base64",
+        tags=["Background Removal"],
+        summary="Remove from Base64",
+        description="Removes the background from a base64-encoded image string.",
+    )
+    async def post_base64(
+        payload: dict = Body(..., example={"image": "base64_encoded_string"}),
+        as_base64: bool = Query(
+            default=False,
+            description="Return output as base64 JSON instead of raw image/png",
+        ),
+        commons: CommonQueryParams = Depends(),
+    ):
+        raw_b64 = payload.get("image")
+        if not raw_b64:
+            raise HTTPException(
+                status_code=400, detail="Missing 'image' key in request JSON body."
+            )
+        if "," in raw_b64:
+            raw_b64 = raw_b64.split(",", 1)[1]
+        try:
+            image_bytes = base64.b64decode(raw_b64)
+        except Exception as e:
+            raise HTTPException(
+                status_code=400, detail=f"Invalid base64 string: {str(e)}"
+            )
+
+        output_bytes = await asyncify(process_image)(image_bytes, commons)
+        if as_base64:
+            encoded = base64.b64encode(output_bytes).decode("ascii")
+            return {"image": f"data:image/png;base64,{encoded}"}
+        return Response(output_bytes, media_type="image/png")
 
     def gr_app(app):
         _fix_bare_socks_proxy_scheme()
