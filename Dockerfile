@@ -15,7 +15,7 @@ ENV POETRY_DYNAMIC_VERSIONING_BYPASS=${POETRY_DYNAMIC_VERSIONING_BYPASS}
 RUN poetry config virtualenvs.create false && \
     poetry install --extras "cpu cli" --without dev
 
-RUN rembg d bria-rmbg
+RUN rembg d u2netp
 
 EXPOSE 7000
 ENTRYPOINT ["rembg"]
